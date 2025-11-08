@@ -1,3 +1,11 @@
+/*
+Author: Prachit Amin
+Class: ECE4122
+Last Date Modified: 10/11/2025
+
+Description:
+Entire Game of Life file using sequential, threaded, and OMP processes.
+*/
 #include <SFML/Graphics.hpp>
 #include <chrono>
 #include <iostream>
@@ -8,25 +16,19 @@
 #include <thread>
 #include <vector>
 
-#define NUMTHREADS 8
-// TODO: 3 functions for the game of life:
-// sequential, threaded, OpenMP
-// RNG for setting grid element to alive or dead -> enum for each grid value
-// continuous generation up until ESC key or window close
-// draw graphics and output processing time
-
-std::vector<std::vector<int>> lifeSEQ(const std::vector<std::vector<int>> &board, int x, int y)
+std::vector<std::vector<int>> lifeSEQ(const std::vector<std::vector<int>> &board)
 {
   // check how the cell SHOULD change, update afterwards to maintain "simultaneous" behavior
   // temporary board
-  std::vector<std::vector<int>> tBoard(x, std::vector<int>(y));
+  int rows = board.size();
+  int cols = board[0].size();
+  std::vector<std::vector<int>> tBoard(rows, std::vector<int>(cols));
+
   for (int i = 0; i < board.size(); i++)
   {
     for (int j = 0; j < board[i].size(); j++)
     {
       int countAlive = 0;
-      int rows = board.size();
-      int cols = board[i].size();
 
       // iterate through the 8 possible neighbor offsets
       for (int di = -1; di <= 1; ++di)
@@ -98,10 +100,12 @@ int mtHelper(const std::vector<std::vector<int>> &board, int i, int j)
 }
 
 // initialize the threads and divvy up the work
-std::vector<std::vector<int>> lifeMT(const std::vector<std::vector<int>> &board, int x, int y)
+std::vector<std::vector<int>> lifeMT(const std::vector<std::vector<int>> &board, int NUMTHREADS)
 {
   // temporary board
-  std::vector<std::vector<int>> tBoard(x, std::vector<int>(y));
+  int rows = board.size();
+  int cols = board[0].size();
+  std::vector<std::vector<int>> tBoard(rows, std::vector<int>(cols));
 
   // set up threading
   std::vector<std::thread> threads;
@@ -112,30 +116,31 @@ std::vector<std::vector<int>> lifeMT(const std::vector<std::vector<int>> &board,
   {
     for (int i = start; i < end; ++i)
     {
-      for (int j = 0; j < y; ++j)
+      // local refs reduce pointer chasing
+      const auto &r0 = (i > 0) ? board[i - 1] : board[i];
+      const auto &r1 = board[i];
+      const auto &r2 = (i < rows - 1) ? board[i + 1] : board[i];
+      auto &out = tBoard[i];
+
+      for (int j = 0; j < cols; ++j)
       {
-        int countAlive = mtHelper(board, i, j);
-        // adjust the temp board according to the rules
-        if (board[i][j] == 1 && (countAlive == 2 || countAlive == 3))
-        { // if the cell is alive and has 2/3 neighbors alive
-          tBoard[i][j] = 1;
-        }
-        else if (board[i][j] == 0 && countAlive == 3)
-        {
-          tBoard[i][j] = 1;
-        }
-        else
-        {
-          tBoard[i][j] = 0;
-        }
+        // do neighbor sum inline (usually faster than a helper call)
+        const int jm1 = (j > 0) ? j - 1 : j;
+        const int jp1 = (j < cols - 1) ? j + 1 : j;
+        int s = r0[jm1] + r0[j] + r0[jp1] + r1[jm1] + r1[jp1] + r2[jm1] + r2[j] + r2[jp1];
+
+        const int alive = r1[j];
+        // branch-free rule
+        out[j] = (s == 3) | (alive & (s == 2));
       }
     }
   };
 
+  // run the threads
   for (int t = 0; t < NUMTHREADS; t++)
   {
-    int start = (x * t) / NUMTHREADS;
-    int end = (x * (t + 1)) / NUMTHREADS;
+    int start = (rows * t) / NUMTHREADS;
+    int end = (rows * (t + 1)) / NUMTHREADS;
 
     threads.emplace_back(worker, start, end);
   }
@@ -148,59 +153,136 @@ std::vector<std::vector<int>> lifeMT(const std::vector<std::vector<int>> &board,
   return tBoard;
 }
 
-void lifeOMP(const std::vector<std::vector<int>> &board, int x, int y) {
-#pragma omp parallel for
+std::vector<std::vector<int>> lifeOMP(const std::vector<std::vector<int>> &board,
+                                      int NUMTHREADS)
+{
+  const int rows = static_cast<int>(board.size());
+  const int cols = static_cast<int>(board[0].size());
+  std::vector<std::vector<int>> tBoard(rows, std::vector<int>(cols, 0));
+
+  omp_set_num_threads(NUMTHREADS);
+  // run omp pragmas
+  #pragma omp parallel for collapse(2) schedule(static)
+  for (int i = 0; i < rows; ++i)
   {
+    for (int j = 0; j < cols; ++j)
+    {
+      int countAlive = 0;
+
+      for (int di = -1; di <= 1; ++di)
+      {
+        for (int dj = -1; dj <= 1; ++dj)
+        {
+          if (di == 0 && dj == 0)
+            continue;
+
+          const int ni = i + di;
+          const int nj = j + dj;
+
+          if (ni >= 0 && ni < rows && nj >= 0 && nj < cols)
+          {
+            countAlive += (board[ni][nj] == 1);
+          }
+        }
+      }
+
+      if ((board[i][j] == 1 && (countAlive == 2 || countAlive == 3)) ||
+          (board[i][j] == 0 && countAlive == 3))
+      {
+        tBoard[i][j] = 1;
+      }
+      else
+      {
+        tBoard[i][j] = 0;
+      }
+    }
   }
+
+  return tBoard;
 }
 
 // accomodate CLA
 // note the cases for threading selection
 int main(int argc, char *argv[])
 {
-  int threads = 2;
+  int threads = 8;
   int cellSize = 5, width = 800, height = 600;
   int t = 1; // 0 -> SEQ, 1 -> THRD, 2 -> OMP
-  std::vector<int> gens;
 
-  // TODO: Revise the flag parsing? use a library?
-  // TODO: Add error checking
   for (int i = 0; i < argc; i++)
   {
     std::string arg = argv[i];
-    // auto nextArg = (i + 1 != argc) ? argv[i + 1] : "";
-    auto nextArg = argv[i + 1];
     if (arg == "-n")
     {
-      threads = atoi(nextArg);
+      try
+      {
+        threads = std::stoi(argv[++i]);
+      }
+      catch (const std::invalid_argument &e)
+      {
+        std::cerr << "Invalid argument " << arg << "\n";
+      }
     }
     else if (arg == "-c")
     {
-      cellSize = atoi(nextArg);
+      try
+      {
+        cellSize = std::stoi(argv[++i]);
+      }
+      catch (const std::invalid_argument &e)
+      {
+        std::cerr << "Invalid argument " << arg << "\n";
+      }
     }
     else if (arg == "-x")
     {
-      width = atoi(nextArg);
+      try
+      {
+        width = std::stoi(argv[++i]);
+      }
+      catch (const std::invalid_argument &e)
+      {
+        std::cerr << "Invalid argument " << arg << "\n";
+      }
     }
     else if (arg == "-y")
     {
-      height = atoi(nextArg);
+      try
+      {
+        height = std::stoi(argv[++i]);
+      }
+      catch (const std::invalid_argument &e)
+      {
+        std::cerr << "Invalid argument " << arg << "\n";
+      }
     }
     else if (arg == "-t")
     {
-      std::cout << nextArg << "\n";
-      if ((std::string)(nextArg) == "SEQ")
+      if ((std::string)(argv[i + 1]) == "SEQ")
       {
         t = 0;
+        i++;
       }
-      else if ((std::string)nextArg == "THRD")
+      else if ((std::string)argv[i + 1] == "THRD")
       {
         t = 1;
+        i++;
       }
-      else if ((std::string)nextArg == "OMP")
+      else if ((std::string)argv[i + 1] == "OMP")
       {
         t = 2;
+        i++;
       }
+      else
+      {
+        std::cerr << "Invalid -t option: " << arg << "\n";
+        return 0;
+      }
+    }
+    else if (i != 0 && arg != " ")
+    {
+      std::cerr << "Invalid argument " << arg << "\n";
+      return 0;
     }
   }
   std::cout << threads << " " << cellSize << " "
@@ -221,9 +303,7 @@ int main(int argc, char *argv[])
     for (int j = 0; j < yCells; j++)
     {
       board[i][j] = rng() % 2; // mod 2 always [0,1], 0 = dead, 1 = alive
-      // std::cout << board[i][j];
     }
-    // std::cout << "\n";
   }
 
   // create variable sized window for the game
@@ -232,6 +312,11 @@ int main(int argc, char *argv[])
   sf::Clock clk;
   clk.restart();
   rect.setFillColor(sf::Color::Black);
+
+  // generation counter for timing metrics
+  int gen = 0;
+  std::chrono::microseconds acc = std::chrono::microseconds::zero();
+
   while (window.isOpen())
   {
     // escape conditions
@@ -252,21 +337,46 @@ int main(int argc, char *argv[])
       }
     }
 
-    // clk.getElapsedTime().asSeconds() >= 0.1
+    // clk.getElapsedTime().asSeconds() >= 0.1 -- to slow down clock speed of game, this might interfere with timing
     if (true)
     {
       // switch case to determine which game type to run
+      gen++;
       if (t == 0)
       {
-        board = lifeSEQ(board, xCells, yCells);
+        auto s = std::chrono::steady_clock::now();
+        board = lifeSEQ(board);
+        auto e = std::chrono::steady_clock::now();
+        acc += std::chrono::duration_cast<std::chrono::microseconds>(e - s);
+        if (++gen % 100 == 0)
+        {
+          std::cout << "100 generations took " << acc.count() << " microseconds with single thread.\n";
+          acc = std::chrono::microseconds::zero();
+        }
       }
       else if (t == 1)
       {
-        board = lifeMT(board, xCells, yCells);
+        auto s = std::chrono::steady_clock::now();
+        board = lifeMT(board, threads);
+        auto e = std::chrono::steady_clock::now();
+        acc += std::chrono::duration_cast<std::chrono::microseconds>(e - s);
+        if (++gen % 100 == 0)
+        {
+          std::cout << "100 generations took " << acc.count() << " microseconds with " << threads << " std::threads.\n";
+          acc = std::chrono::microseconds::zero();
+        }
       }
       else if (t == 2)
       {
-        board = lifeOMP(board, xCells, yCells);
+        auto s = std::chrono::steady_clock::now();
+        board = lifeOMP(board, threads);
+        auto e = std::chrono::steady_clock::now();
+        acc += std::chrono::duration_cast<std::chrono::microseconds>(e - s);
+        if (++gen % 100 == 0)
+        {
+          std::cout << "100 generations took " << acc.count() << " microseconds with " << threads << " OMP threads.\n";
+          acc = std::chrono::microseconds::zero();
+        }
       }
 
       clk.restart();
