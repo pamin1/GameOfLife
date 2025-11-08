@@ -8,7 +8,6 @@ Follow the cloning instructions:
 git clone https://github.com/PacktPublishing/Beginning-Cpp-Game-Programming-Second-Edition.git
 cd Beginning-Cpp-Game-Programming-Second-Edition.git
 git clone https://github.com/pamin1/GameOfLife.git
-cd ..
 ```
 
 Now add the following line to the game programming CMakeLists.txt:
